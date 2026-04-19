@@ -16,52 +16,60 @@ def predict():
     data = request.json
     image_path = data.get('image_path')
     
-    # Validasi keberadaan file gambar
     if not image_path or not os.path.exists(image_path):
         return jsonify({'error': 'Gambar tidak ditemukan'}), 400
 
     try:
-        # 2. Jalankan Deteksi YOLOv11
-        # conf=0.25 (diturunkan sedikit agar lebih sensitif mendeteksi gigi)
-        # iou=0.45 untuk menangani kotak yang tumpang tindih
-        results = model.predict(
-            source=image_path, 
-            conf=0.25, 
-            iou=0.45,
-            save=False
-        )
+        # 1. Jalankan Deteksi
+        results = model.predict(source=image_path, conf=0.25, iou=0.45, save=False)
         
-        # 3. Plotting Bounding Box (PENTING: Ini yang membuat kotak muncul)
-        # Fungsi .plot() akan merender kotak, label FDI, dan skor confidence ke dalam array gambar
-        res_plotted = results[0].plot()
-        
-        # 4. Tentukan Path Simpan Hasil ke Folder Storage Laravel
+        # 2. Persiapan Path & Gambar Asli
+        img_orig = cv2.imread(image_path)
+        h_orig, w_orig, _ = img_orig.shape
         dir_name = os.path.dirname(image_path)
-        base_name = os.path.basename(image_path)
+        # Ambil nama file tanpa ekstensi (misal: 'gigi' bukan 'gigi.jpg')
+        base_name_no_ext = os.path.splitext(os.path.basename(image_path))[0]
         
-        # Buat nama file baru dengan awalan 'result_' agar tidak menindih file asli
-        result_filename = f"result_{base_name}"
-        result_path = os.path.join(dir_name, result_filename)
-        
-        # Simpan gambar hasil deteksi (ber-bounding box) menggunakan OpenCV
-        cv2.imwrite(result_path, res_plotted)
-
-        # 5. Susun Data deteksi untuk Tabel Verifikasi di Frontend
         detections = []
+        
+        
+       # Di dalam app.py, ganti bagian loop cropping:
         for box in results[0].boxes:
             fdi_number = model.names[int(box.cls)]
-            detections.append({
-                'fdi': fdi_number,
-                'confidence': round(float(box.conf) * 100, 2), # Contoh: 98.50
-                'box': box.xyxy[0].tolist() 
-            })
+            conf = round(float(box.conf) * 100, 2)
+            coords = box.xyxy[0].tolist() 
+            x1, y1, x2, y2 = map(int, coords)
+            
+            # --- PERBAIKAN: PADDING LEBIH KECIL AGAR FOKUS ---
+            padding = 20 # Kecilkan dari 60 ke 20 agar tidak bocor ke gigi sebelah
+            
+            px1 = max(0, x1 - padding)
+            py1 = max(0, y1 - padding)
+            px2 = min(w_orig, x2 + padding)
+            py2 = min(h_orig, y2 + padding)
+            
+            crop_img = img_orig[py1:py2, px1:px2]
+            
+            if crop_img.size > 0:
+                crop_filename = f"crop_{fdi_number}_{base_name_no_ext}.jpg"
+                cv2.imwrite(os.path.join(dir_name, crop_filename), crop_img)
+                
+                detections.append({
+                    'fdi': str(fdi_number), # Pastikan dikirim sebagai string
+                    'confidence': conf,
+                    'crop_image': crop_filename
+                })
 
-        # Kirim respon balik ke Laravel
+        # 4. Plot Bounding Box Utama (Untuk sisi kanan UI)
+        res_plotted = results[0].plot()
+        result_filename = f"result_{os.path.basename(image_path)}"
+        cv2.imwrite(os.path.join(dir_name, result_filename), res_plotted)
+
         return jsonify({
             'status': 'success',
             'total': len(detections),
             'results': detections,
-            'result_image': result_filename # Nama file ini akan ditangkap oleh React
+            'result_image': result_filename
         })
 
     except Exception as e:
